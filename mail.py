@@ -1,5 +1,5 @@
 import logging
-import httpx  # Menggantikan library requests
+import httpx
 import random
 from faker import Faker
 from telegram import Update
@@ -19,7 +19,6 @@ fake = Faker('id_ID')  # Menggunakan lokal Indonesia untuk nama yang lebih famil
 async def get_mail_domain():
     """Mengambil domain yang tersedia dari API mail.tm secara asinkron."""
     try:
-        # Menggunakan httpx untuk request asinkron
         async with httpx.AsyncClient() as client:
             response = await client.get("https://api.mail.tm/domains", timeout=10)
         
@@ -32,18 +31,18 @@ async def get_mail_domain():
     return None
 
 async def create_temp_email():
-    """Membuat akun email sementara dengan nama orang acak."""
+    """Membuat akun email sementara dengan gabungan nama orang (tanpa titik/angka)."""
     domain = await get_mail_domain()
     if not domain:
         return None, "Server mail.tm sedang tidak merespons. Coba lagi nanti."
 
-    for i in range(5):  # Mencoba membuat nama unik hingga 5 kali
-        # Membuat username dari nama acak
+    for _ in range(5):  # Mencoba membuat nama unik hingga 5 kali
+        # --- PERUBAHAN FORMAT USERNAME DI SINI ---
+        # Membuat username dari gabungan nama acak tanpa spasi, titik, atau angka
         first_name = fake.first_name().lower().replace(" ", "")
         last_name = fake.last_name().lower().replace(" ", "")
-        username = f"{first_name}.{last_name}"
-        if i > 0:  # Jika nama sudah terpakai, tambahkan angka acak
-            username += str(random.randint(10, 999))
+        username = f"{first_name}{last_name}"
+        # -----------------------------------------
         
         email_address = f"{username}@{domain}"
         password = fake.password(length=12, special_chars=True, digits=True, upper_case=True, lower_case=True)
@@ -60,8 +59,8 @@ async def create_temp_email():
             if response.status_code == 201:  # 201 Created = Sukses
                 return {"email": email_address, "password": password}, None
             elif response.status_code == 422: # Jika username sudah terpakai
-                logger.warning(f"Username '{username}' sudah terpakai, mencoba nama lain...")
-                continue
+                logger.warning(f"Username '{username}' sudah terpakai, mencoba nama baru...")
+                continue # Lanjut ke iterasi berikutnya untuk membuat kombinasi nama yang baru
             else:
                 error_detail = response.json().get('hydra:description', 'Error tidak diketahui')
                 return None, f"Gagal membuat akun. Server: {error_detail} (Status: {response.status_code})"
