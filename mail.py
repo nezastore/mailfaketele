@@ -123,7 +123,7 @@ def main():
     print("\nSilakan masukkan Token Bot Anda.")
     print("Anda bisa mendapatkannya dari @BotFather di Telegram.")
     
-    token = input("7879944054:AAHgAH8uqMTSSB5UWMAB7NFEfQvEFGChxNY: ").strip()
+    token = input("Masukkan Token di sini: ").strip()
     
     if not token:
         print("\n[!] KESALAHAN: Token tidak boleh kosong. Skrip berhenti.")
