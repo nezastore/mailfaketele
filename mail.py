@@ -120,7 +120,7 @@ async def buat_email_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 def main():
     """Fungsi utama untuk menjalankan bot."""
-    if TELEGRAM_BOT_TOKEN == "GANTI_DENGAN_TOKEN_BOT_ANDA":
+    if TELEGRAM_BOT_TOKEN == "7879944054:AAHgAH8uqMTSSB5UWMAB7NFEfQvEFGChxNY":
         print("!!! KESALAHAN: Harap ganti 'GANTI_DENGAN_TOKEN_BOT_ANDA' dengan token bot Anda yang asli di dalam file skrip.")
         return
 
