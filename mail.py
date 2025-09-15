@@ -1,13 +1,9 @@
 import logging
-import requests
+import httpx  # Menggantikan library requests
 import random
 from faker import Faker
-from telegram import Update, Bot
+from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
-
-# --- KONFIGURASI ---
-# Ganti dengan Token Bot Telegram Anda yang didapat dari BotFather
-TELEGRAM_BOT_TOKEN = "7879944054:AAHgAH8uqMTSSB5UWMAB7NFEfQvEFGChxNY"
 
 # Konfigurasi logging untuk melihat error (opsional tapi sangat disarankan)
 logging.basicConfig(
@@ -16,14 +12,17 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Inisialisasi Faker untuk membuat nama acak
-fake = Faker('id_ID') # Menggunakan lokal Indonesia untuk nama yang lebih familiar
+fake = Faker('id_ID')  # Menggunakan lokal Indonesia untuk nama yang lebih familiar
 
 # --- FUNGSI UTAMA PEMBUAT EMAIL ---
 
 async def get_mail_domain():
-    """Mengambil domain yang tersedia dari API mail.tm."""
+    """Mengambil domain yang tersedia dari API mail.tm secara asinkron."""
     try:
-        response = await requests.get("https://api.mail.tm/domains", timeout=10)
+        # Menggunakan httpx untuk request asinkron
+        async with httpx.AsyncClient() as client:
+            response = await client.get("https://api.mail.tm/domains", timeout=10)
+        
         if response.status_code == 200:
             domains = response.json()['hydra:member']
             return random.choice(domains)['domain']
@@ -38,33 +37,34 @@ async def create_temp_email():
     if not domain:
         return None, "Server mail.tm sedang tidak merespons. Coba lagi nanti."
 
-    for i in range(5): # Mencoba membuat nama unik hingga 5 kali
+    for i in range(5):  # Mencoba membuat nama unik hingga 5 kali
         # Membuat username dari nama acak
-        first_name = fake.first_name().lower()
-        last_name = fake.last_name().lower()
+        first_name = fake.first_name().lower().replace(" ", "")
+        last_name = fake.last_name().lower().replace(" ", "")
         username = f"{first_name}.{last_name}"
-        if i > 0: # Jika nama sudah terpakai, tambahkan angka acak
+        if i > 0:  # Jika nama sudah terpakai, tambahkan angka acak
             username += str(random.randint(10, 999))
         
         email_address = f"{username}@{domain}"
         password = fake.password(length=12, special_chars=True, digits=True, upper_case=True, lower_case=True)
         
         try:
-            # Mengirim permintaan untuk membuat akun
+            # Mengirim permintaan untuk membuat akun menggunakan httpx
             api_url = "https://api.mail.tm/accounts"
             headers = {"Content-Type": "application/json"}
             data = {"address": email_address, "password": password}
             
-            response = requests.post(api_url, headers=headers, json=data, timeout=10)
+            async with httpx.AsyncClient() as client:
+                response = await client.post(api_url, headers=headers, json=data, timeout=10)
             
-            if response.status_code == 201: # 201 Created = Sukses
+            if response.status_code == 201:  # 201 Created = Sukses
                 return {"email": email_address, "password": password}, None
-            # Jika username sudah terpakai, API akan mengembalikan error 422
-            elif response.status_code == 422:
+            elif response.status_code == 422: # Jika username sudah terpakai
                 logger.warning(f"Username '{username}' sudah terpakai, mencoba nama lain...")
-                continue # Lanjut ke iterasi berikutnya untuk membuat nama baru
+                continue
             else:
-                return None, f"Gagal membuat akun. Server memberikan status: {response.status_code}"
+                error_detail = response.json().get('hydra:description', 'Error tidak diketahui')
+                return None, f"Gagal membuat akun. Server: {error_detail} (Status: {response.status_code})"
                 
         except Exception as e:
             logger.error(f"Error saat membuat email: {e}")
@@ -87,20 +87,16 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def buat_email_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handler untuk perintah /buatemail."""
-    # Kirim pesan bahwa proses sedang berjalan
     processing_message = await update.message.reply_text("Sedang memproses permintaan Anda, mohon tunggu... ⏳")
     
-    # Panggil fungsi untuk membuat email
     result, error_message = await create_temp_email()
     
-    # Hapus pesan "sedang memproses"
     await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=processing_message.message_id)
     
     if result:
         email = result['email']
         password = result['password']
         
-        # Format pesan balasan yang profesional
         response_text = (
             "✅ *Email Berhasil Dibuat* ✅\n\n"
             "Berikut adalah detail akun email sementara Anda:\n\n"
@@ -112,7 +108,6 @@ async def buat_email_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
         await update.message.reply_text(response_text, parse_mode='Markdown', disable_web_page_preview=True)
     else:
-        # Kirim pesan error jika gagal
         error_text = f"❌ *Gagal Membuat Email*\n\n*Alasan:* {error_message}"
         await update.message.reply_text(error_text, parse_mode='Markdown')
 
@@ -120,19 +115,30 @@ async def buat_email_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 def main():
     """Fungsi utama untuk menjalankan bot."""
-    if TELEGRAM_BOT_TOKEN == "7879944054:AAHgAH8uqMTSSB5UWMAB7NFEfQvEFGChxNY":
-        print("!!! KESALAHAN: Harap ganti 'GANTI_DENGAN_TOKEN_BOT_ANDA' dengan token bot Anda yang asli di dalam file skrip.")
+    
+    # --- Kolom Input Token yang Jelas ---
+    print("\n" + "="*50)
+    print("      BOT PEMBUAT EMAIL TELEGRAM OLEH NEZA")
+    print("="*50)
+    print("\nSilakan masukkan Token Bot Anda.")
+    print("Anda bisa mendapatkannya dari @BotFather di Telegram.")
+    
+    token = input("7879944054:AAHgAH8uqMTSSB5UWMAB7NFEfQvEFGChxNY: ").strip()
+    
+    if not token:
+        print("\n[!] KESALAHAN: Token tidak boleh kosong. Skrip berhenti.")
         return
+    print("\n[✓] Token diterima. Mencoba menjalankan bot...")
+    print("="*50)
+    # ------------------------------------
 
-    print("Bot sedang berjalan...")
+    application = Application.builder().token(token).build()
     
-    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-    
-    # Daftarkan handler perintah
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("buatemail", buat_email_command))
     
-    # Jalankan bot
+    print("\nBot sekarang online dan berjalan!")
+    print("Tekan CTRL+C untuk menghentikan bot.")
     application.run_polling()
 
 if __name__ == "__main__":
