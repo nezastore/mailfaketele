@@ -5,14 +5,14 @@ from faker import Faker
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
-# Konfigurasi logging untuk melihat error (opsional tapi sangat disarankan)
+# Konfigurasi logging
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# Inisialisasi Faker untuk membuat nama acak
-fake = Faker('id_ID')  # Menggunakan lokal Indonesia untuk nama yang lebih familiar
+# Inisialisasi Faker
+fake = Faker('id_ID')
 
 # --- FUNGSI UTAMA PEMBUAT EMAIL ---
 
@@ -36,19 +36,15 @@ async def create_temp_email():
     if not domain:
         return None, "Server mail.tm sedang tidak merespons. Coba lagi nanti."
 
-    for _ in range(5):  # Mencoba membuat nama unik hingga 5 kali
-        # --- PERUBAHAN FORMAT USERNAME DI SINI ---
-        # Membuat username dari gabungan nama acak tanpa spasi, titik, atau angka
+    for _ in range(5):
         first_name = fake.first_name().lower().replace(" ", "")
         last_name = fake.last_name().lower().replace(" ", "")
         username = f"{first_name}{last_name}"
-        # -----------------------------------------
         
         email_address = f"{username}@{domain}"
         password = fake.password(length=12, special_chars=True, digits=True, upper_case=True, lower_case=True)
         
         try:
-            # Mengirim permintaan untuk membuat akun menggunakan httpx
             api_url = "https://api.mail.tm/accounts"
             headers = {"Content-Type": "application/json"}
             data = {"address": email_address, "password": password}
@@ -56,11 +52,11 @@ async def create_temp_email():
             async with httpx.AsyncClient() as client:
                 response = await client.post(api_url, headers=headers, json=data, timeout=10)
             
-            if response.status_code == 201:  # 201 Created = Sukses
+            if response.status_code == 201:
                 return {"email": email_address, "password": password}, None
-            elif response.status_code == 422: # Jika username sudah terpakai
+            elif response.status_code == 422:
                 logger.warning(f"Username '{username}' sudah terpakai, mencoba nama baru...")
-                continue # Lanjut ke iterasi berikutnya untuk membuat kombinasi nama yang baru
+                continue
             else:
                 error_detail = response.json().get('hydra:description', 'Error tidak diketahui')
                 return None, f"Gagal membuat akun. Server: {error_detail} (Status: {response.status_code})"
@@ -85,8 +81,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(welcome_message, parse_mode='Markdown')
 
 async def buat_email_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handler untuk perintah /buatemail."""
-    processing_message = await update.message.reply_text("Sedang memproses permintaan Anda, mohon tunggu... ⏳")
+    """Handler untuk perintah /buatemail dengan output profesional."""
+    processing_message = await update.message.reply_text("⏳ Sedang membuat akun email Anda...")
     
     result, error_message = await create_temp_email()
     
@@ -96,14 +92,17 @@ async def buat_email_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         email = result['email']
         password = result['password']
         
+        # --- TAMPILAN OUTPUT BARU YANG PROFESIONAL ---
         response_text = (
-            "✅ *Email Berhasil Dibuat* ✅\n\n"
-            "Berikut adalah detail akun email sementara Anda:\n\n"
-            "📧 *Alamat Email:*\n"
-            f"`{email}`\n\n"
-            "🔑 *Password:*\n"
-            f"`{password}`\n\n"
-            "Anda bisa login dan memeriksa inbox di situs [mail.tm](https://mail.tm/)."
+            f"┌─  *AKUN EMAIL ANDA TELAH SIAP* ─┐\n"
+            f"│\n"
+            f"│  📧  *Email*\n"
+            f"│  `{email}`\n"
+            f"│\n"
+            f"│  🔑  *Password*\n"
+            f"│  `{password}`\n"
+            f"│\n"
+            f"└─  *Login di [situs mail.tm](https://mail.tm/) untuk membuka inbox.* ─┘"
         )
         await update.message.reply_text(response_text, parse_mode='Markdown', disable_web_page_preview=True)
     else:
@@ -114,8 +113,6 @@ async def buat_email_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 def main():
     """Fungsi utama untuk menjalankan bot."""
-    
-    # --- Kolom Input Token yang Jelas ---
     print("\n" + "="*50)
     print("      BOT PEMBUAT EMAIL TELEGRAM OLEH NEZA")
     print("="*50)
@@ -129,7 +126,6 @@ def main():
         return
     print("\n[✓] Token diterima. Mencoba menjalankan bot...")
     print("="*50)
-    # ------------------------------------
 
     application = Application.builder().token(token).build()
     
