@@ -49,7 +49,6 @@ async def create_temp_email():
     return None, "Gagal menemukan nama unik."
 
 async def get_auth_token(email, password):
-    """Mendapatkan token otorisasi untuk mengakses inbox."""
     try:
         async with httpx.AsyncClient() as client:
             r = await client.post("https://api.mail.tm/token", json={"address": email, "password": password})
@@ -61,7 +60,6 @@ async def get_auth_token(email, password):
         return None, "Koneksi error saat otentikasi."
 
 async def fetch_messages(token):
-    """Mengambil daftar ringkasan pesan dari inbox."""
     headers = {'Authorization': f'Bearer {token}'}
     try:
         async with httpx.AsyncClient() as client:
@@ -74,7 +72,6 @@ async def fetch_messages(token):
         return None, "Koneksi error saat mengambil pesan."
 
 async def fetch_message_content(token, message_id):
-    """Mengambil isi lengkap dari satu pesan spesifik."""
     headers = {'Authorization': f'Bearer {token}'}
     try:
         async with httpx.AsyncClient() as client:
@@ -88,6 +85,20 @@ async def fetch_message_content(token, message_id):
 
 # --- HANDLER PERINTAH TELEGRAM ---
 
+def get_base_info_text(email, password, footer_text):
+    """Fungsi bantuan untuk membuat blok informasi akun dasar."""
+    return (
+        f"┌─  *AKUN EMAIL ANDA* ─┐\n"
+        f"│\n"
+        f"│  📧  *Email*\n"
+        f"│  `{email}`\n"
+        f"│\n"
+        f"│  🔑  *Password*\n"
+        f"│  `{password}`\n"
+        f"│\n"
+        f"└─  _{footer_text}_ ─┘"
+    )
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_name = update.message.from_user.first_name
     await update.message.reply_text(
@@ -100,20 +111,17 @@ async def buat_email_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     result, error = await create_temp_email()
     await context.bot.delete_message(chat_id=chat_id, message_id=processing_message.message_id)
     if result:
-        user_sessions[chat_id] = {'email': result['email'], 'password': result['password']}
+        email, password = result['email'], result['password']
+        user_sessions[chat_id] = {'email': email, 'password': password}
+        
         keyboard = [[InlineKeyboardButton("📬 Cek Inbox", callback_data="check_inbox_0")]]
-        response_text = (
-            f"┌─  *AKUN EMAIL ANDA TELAH SIAP* ─┐\n│\n"
-            f"│  📧  *Email*\n│  `{result['email']}`\n│\n"
-            f"│  🔑  *Password*\n│  `{result['password']}`\n│\n"
-            f"└─  *Gunakan tombol di bawah untuk memeriksa inbox.* ─┘"
-        )
+        response_text = get_base_info_text(email, password, "Gunakan tombol di bawah untuk memeriksa inbox.")
+        
         await update.message.reply_text(response_text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
     else:
         await update.message.reply_text(f"❌ *Gagal Membuat Email*\n\n*Alasan:* {error}", parse_mode='Markdown')
 
 async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Menangani semua klik tombol: cek inbox, buka pesan, dan kembali."""
     query = update.callback_query
     await query.answer()
     
@@ -125,34 +133,33 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
 
     action_parts = query.data.split('_')
     action = action_parts[0]
+    email, password = session['email'], session['password']
 
     # === AKSI: Cek Inbox ===
     if action == "check" and "inbox" in action_parts:
-        token, error = await get_auth_token(session['email'], session['password'])
-        if error:
-            await query.edit_message_text(f"Error: {error}"); return
+        token, error = await get_auth_token(email, password)
+        if error: await query.edit_message_text(f"Error: {error}"); return
         
         messages, error = await fetch_messages(token)
-        if error:
-            await query.edit_message_text(f"Error: {error}"); return
+        if error: await query.edit_message_text(f"Error: {error}"); return
         
-        # Simpan daftar pesan ke sesi
         user_sessions[chat_id]['messages'] = messages
         
-        inbox_text = "\n*Inbox Anda saat ini kosong.*"
+        base_text = get_base_info_text(email, password, "Inbox terakhir diperbarui...")
+        inbox_text = "\n\n*Inbox Anda saat ini kosong.*"
         keyboard = [[InlineKeyboardButton(f"🔄 Refresh Inbox (0)", callback_data="check_inbox_0")]]
         
         if messages:
-            inbox_text = "\n*Pesan yang diterima:*\n"
+            inbox_text = "\n\n*Pesan yang diterima:*\n"
             keyboard = []
             for i, msg in enumerate(messages):
                 sender = msg['from']['address']
                 subject = msg.get('subject', '(Tanpa subjek)')
                 inbox_text += f"*{i+1}.* Dari: `{sender}`\n    Subjek: _{subject}_\n"
-                keyboard.append([InlineKeyboardButton(f"✉️ Buka Pesan #{i+1} ({sender})", callback_data=f"open_message_{i}")])
+                keyboard.append([InlineKeyboardButton(f"✉️ Buka Pesan #{i+1}", callback_data=f"open_message_{i}")])
             keyboard.append([InlineKeyboardButton(f"🔄 Refresh Inbox ({len(messages)})", callback_data="check_inbox_0")])
         
-        response_text = f"┌─ *INBOX UNTUK* `{session['email']}` ─┐\n└─ *Pilih pesan untuk dibuka...* ─┘{inbox_text}"
+        response_text = base_text + inbox_text
         await query.edit_message_text(text=response_text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
 
     # === AKSI: Buka Pesan ===
@@ -161,27 +168,25 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             msg_index = int(action_parts[2])
             message_to_open = user_sessions[chat_id]['messages'][msg_index]
         except (ValueError, IndexError):
-            await query.edit_message_text("Pesan tidak valid atau tidak ditemukan."); return
+            await query.edit_message_text("Pesan tidak valid."); return
 
-        token, error = await get_auth_token(session['email'], session['password'])
-        if error:
-            await query.edit_message_text(f"Error: {error}"); return
+        token, error = await get_auth_token(email, password)
+        if error: await query.edit_message_text(f"Error: {error}"); return
 
         content, error = await fetch_message_content(token, message_to_open['id'])
-        if error:
-            await query.edit_message_text(f"Error: {error}"); return
+        if error: await query.edit_message_text(f"Error: {error}"); return
 
-        sender = content['from']['address']
+        base_text = get_base_info_text(email, password, "Menampilkan isi pesan...")
         subject = content.get('subject', '(Tanpa subjek)')
         body = content.get('text', '(Tidak ada isi pesan teks)').strip()
         
-        response_text = (
-            f"┌─ *ISI PESAN* ─┐\n"
-            f"│ *Dari:* `{sender}`\n"
+        content_text = (
+            f"\n\n┌─ *ISI PESAN* ─┐\n"
             f"│ *Subjek:* _{subject}_\n"
-            f"└─" + "─"*25 + "─┘\n\n"
-            f"{body[:1500]}" # Batasi panjang pesan agar tidak terlalu panjang
+            f"└─" + "─"*20 + "─┘\n"
+            f"`{body[:1500]}`"
         )
+        response_text = base_text + content_text
         keyboard = [[InlineKeyboardButton("↩️ Kembali ke Inbox", callback_data="check_inbox_0")]]
         await query.edit_message_text(text=response_text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
 
