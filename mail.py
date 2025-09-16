@@ -14,184 +14,185 @@ logger = logging.getLogger(__name__)
 # Inisialisasi Faker
 fake = Faker('id_ID')
 
-# Dictionary untuk menyimpan sesi email & password per pengguna
+# Dictionary untuk menyimpan sesi email, password, dan pesan per pengguna
 user_sessions = {}
 
 # --- FUNGSI API MAIL.TM ---
 
 async def get_mail_domain():
-    """Mengambil domain yang tersedia dari API mail.tm."""
     try:
         async with httpx.AsyncClient() as client:
-            response = await client.get("https://api.mail.tm/domains", timeout=10)
-        if response.status_code == 200:
-            return random.choice(response.json()['hydra:member'])['domain']
+            r = await client.get("https://api.mail.tm/domains", timeout=10)
+        if r.status_code == 200:
+            return random.choice(r.json()['hydra:member'])['domain']
     except Exception as e:
         logger.error(f"Gagal mengambil domain: {e}")
     return None
 
 async def create_temp_email():
-    """Membuat akun email sementara."""
     domain = await get_mail_domain()
     if not domain:
         return None, "Server mail.tm sedang tidak merespons."
-
     for _ in range(5):
-        first_name = fake.first_name().lower().replace(" ", "")
-        last_name = fake.last_name().lower().replace(" ", "")
-        username = f"{first_name}{last_name}"
-        email_address = f"{username}@{domain}"
-        password = fake.password(length=12)
-        
+        username = f"{fake.first_name().lower().replace(' ', '')}{fake.last_name().lower().replace(' ', '')}"
+        email_address, password = f"{username}@{domain}", fake.password(length=12)
         try:
-            data = {"address": email_address, "password": password}
             async with httpx.AsyncClient() as client:
-                response = await client.post("https://api.mail.tm/accounts", json=data, timeout=10)
-            if response.status_code == 201:
+                r = await client.post("https://api.mail.tm/accounts", json={"address": email_address, "password": password})
+            if r.status_code == 201:
                 return {"email": email_address, "password": password}, None
-            elif response.status_code == 422:
-                logger.warning(f"Username '{username}' terpakai, mencoba lagi...")
+            elif r.status_code == 422:
                 continue
-            else:
-                return None, f"Gagal membuat akun. Status: {response.status_code}"
         except Exception as e:
             logger.error(f"Error saat membuat email: {e}")
             return None, "Koneksi error saat membuat email."
     return None, "Gagal menemukan nama unik."
 
-async def fetch_messages(email, password):
-    """Mengambil pesan dari inbox sebuah akun email."""
+async def get_auth_token(email, password):
+    """Mendapatkan token otorisasi untuk mengakses inbox."""
     try:
         async with httpx.AsyncClient() as client:
-            auth_response = await client.post("https://api.mail.tm/token", json={"address": email, "password": password}, timeout=10)
-            if auth_response.status_code != 200:
-                return None, "Gagal login ke mail.tm (username/password salah)."
-            
-            token = auth_response.json()['token']
-            headers = {'Authorization': f'Bearer {token}'}
-            
-            messages_response = await client.get("https://api.mail.tm/messages", headers=headers, timeout=10)
-            if messages_response.status_code == 200:
-                return messages_response.json()['hydra:member'], None
-            else:
-                return None, "Gagal mengambil pesan dari server."
+            r = await client.post("https://api.mail.tm/token", json={"address": email, "password": password})
+        if r.status_code == 200:
+            return r.json()['token'], None
+        return None, "Gagal login ke mail.tm (token tidak valid)."
     except Exception as e:
-        logger.error(f"Error saat mengambil pesan: {e}")
+        logger.error(f"Error otentikasi: {e}")
+        return None, "Koneksi error saat otentikasi."
+
+async def fetch_messages(token):
+    """Mengambil daftar ringkasan pesan dari inbox."""
+    headers = {'Authorization': f'Bearer {token}'}
+    try:
+        async with httpx.AsyncClient() as client:
+            r = await client.get("https://api.mail.tm/messages", headers=headers)
+        if r.status_code == 200:
+            return r.json()['hydra:member'], None
+        return None, "Gagal mengambil daftar pesan."
+    except Exception as e:
+        logger.error(f"Error mengambil pesan: {e}")
         return None, "Koneksi error saat mengambil pesan."
+
+async def fetch_message_content(token, message_id):
+    """Mengambil isi lengkap dari satu pesan spesifik."""
+    headers = {'Authorization': f'Bearer {token}'}
+    try:
+        async with httpx.AsyncClient() as client:
+            r = await client.get(f"https://api.mail.tm/messages/{message_id}", headers=headers)
+        if r.status_code == 200:
+            return r.json(), None
+        return None, "Gagal mengambil isi pesan."
+    except Exception as e:
+        logger.error(f"Error mengambil isi pesan: {e}")
+        return None, "Koneksi error saat mengambil isi pesan."
 
 # --- HANDLER PERINTAH TELEGRAM ---
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_name = update.message.from_user.first_name
     await update.message.reply_text(
-        f"👋 Halo, *{user_name}*!\n\n"
-        "Kirim /buatemail untuk membuat email baru.\n"
-        "Setelah email dibuat, Anda akan mendapatkan tombol untuk memeriksa inbox.",
-        parse_mode='Markdown'
+        f"👋 Halo, *{user_name}*!\n\nKirim /buatemail untuk membuat email baru.", parse_mode='Markdown'
     )
 
 async def buat_email_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat_id
     processing_message = await update.message.reply_text("⏳ Sedang membuat akun email Anda...")
-    
-    result, error_message = await create_temp_email()
-    
+    result, error = await create_temp_email()
     await context.bot.delete_message(chat_id=chat_id, message_id=processing_message.message_id)
-    
     if result:
-        email = result['email']
-        password = result['password']
-        user_sessions[chat_id] = {'email': email, 'password': password}
-        
-        keyboard = [[InlineKeyboardButton("📬 Cek Inbox (0)", callback_data="check_inbox")]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
+        user_sessions[chat_id] = {'email': result['email'], 'password': result['password']}
+        keyboard = [[InlineKeyboardButton("📬 Cek Inbox", callback_data="check_inbox_0")]]
         response_text = (
-            f"┌─  *AKUN EMAIL ANDA TELAH SIAP* ─┐\n"
-            f"│\n"
-            f"│  📧  *Email*\n"
-            f"│  `{email}`\n"
-            f"│\n"
-            f"│  🔑  *Password*\n"
-            f"│  `{password}`\n"
-            f"│\n"
+            f"┌─  *AKUN EMAIL ANDA TELAH SIAP* ─┐\n│\n"
+            f"│  📧  *Email*\n│  `{result['email']}`\n│\n"
+            f"│  🔑  *Password*\n│  `{result['password']}`\n│\n"
             f"└─  *Gunakan tombol di bawah untuk memeriksa inbox.* ─┘"
         )
-        await update.message.reply_text(response_text, parse_mode='Markdown', reply_markup=reply_markup)
+        await update.message.reply_text(response_text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
     else:
-        await update.message.reply_text(f"❌ *Gagal Membuat Email*\n\n*Alasan:* {error_message}", parse_mode='Markdown')
+        await update.message.reply_text(f"❌ *Gagal Membuat Email*\n\n*Alasan:* {error}", parse_mode='Markdown')
 
 async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Menangani semua klik tombol: cek inbox, buka pesan, dan kembali."""
     query = update.callback_query
-    await query.answer("Sedang memeriksa inbox...")
+    await query.answer()
     
-    # --- INI ADALAH BARIS YANG DIPERBAIKI ---
     chat_id = query.message.chat_id
-    # ----------------------------------------
-    
-    if query.data == "check_inbox":
-        session = user_sessions.get(chat_id)
-        if not session:
-            await query.edit_message_text("Sesi Anda tidak ditemukan. Silakan buat email baru dengan /buatemail.", reply_markup=None)
-            return
+    session = user_sessions.get(chat_id)
+    if not session:
+        await query.edit_message_text("Sesi tidak ditemukan. Buat email baru dengan /buatemail.")
+        return
 
-        email = session['email']
-        password = session['password']
-        
-        messages, error = await fetch_messages(email, password)
-        
+    action_parts = query.data.split('_')
+    action = action_parts[0]
+
+    # === AKSI: Cek Inbox ===
+    if action == "check" and "inbox" in action_parts:
+        token, error = await get_auth_token(session['email'], session['password'])
         if error:
-            # Menggunakan query.message.text agar teks lama tidak hilang saat error
-            await query.edit_message_text(f"{query.message.text}\n\n*Error:* {error}", parse_mode='Markdown', reply_markup=query.message.reply_markup)
-            return
-
-        if not messages:
-            inbox_text = "\n*Inbox Anda saat ini kosong.*"
-        else:
+            await query.edit_message_text(f"Error: {error}"); return
+        
+        messages, error = await fetch_messages(token)
+        if error:
+            await query.edit_message_text(f"Error: {error}"); return
+        
+        # Simpan daftar pesan ke sesi
+        user_sessions[chat_id]['messages'] = messages
+        
+        inbox_text = "\n*Inbox Anda saat ini kosong.*"
+        keyboard = [[InlineKeyboardButton(f"🔄 Refresh Inbox (0)", callback_data="check_inbox_0")]]
+        
+        if messages:
             inbox_text = "\n*Pesan yang diterima:*\n"
-            for msg in messages:
+            keyboard = []
+            for i, msg in enumerate(messages):
                 sender = msg['from']['address']
                 subject = msg.get('subject', '(Tanpa subjek)')
-                inbox_text += f"• Dari: `{sender}`\n  Subjek: _{subject}_\n"
+                inbox_text += f"*{i+1}.* Dari: `{sender}`\n    Subjek: _{subject}_\n"
+                keyboard.append([InlineKeyboardButton(f"✉️ Buka Pesan #{i+1} ({sender})", callback_data=f"open_message_{i}")])
+            keyboard.append([InlineKeyboardButton(f"🔄 Refresh Inbox ({len(messages)})", callback_data="check_inbox_0")])
+        
+        response_text = f"┌─ *INBOX UNTUK* `{session['email']}` ─┐\n└─ *Pilih pesan untuk dibuka...* ─┘{inbox_text}"
+        await query.edit_message_text(text=response_text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
+
+    # === AKSI: Buka Pesan ===
+    elif action == "open" and "message" in action_parts:
+        try:
+            msg_index = int(action_parts[2])
+            message_to_open = user_sessions[chat_id]['messages'][msg_index]
+        except (ValueError, IndexError):
+            await query.edit_message_text("Pesan tidak valid atau tidak ditemukan."); return
+
+        token, error = await get_auth_token(session['email'], session['password'])
+        if error:
+            await query.edit_message_text(f"Error: {error}"); return
+
+        content, error = await fetch_message_content(token, message_to_open['id'])
+        if error:
+            await query.edit_message_text(f"Error: {error}"); return
+
+        sender = content['from']['address']
+        subject = content.get('subject', '(Tanpa subjek)')
+        body = content.get('text', '(Tidak ada isi pesan teks)').strip()
         
         response_text = (
-            f"┌─  *AKUN EMAIL ANDA* ─┐\n"
-            f"│\n"
-            f"│  📧  *Email*\n"
-            f"│  `{email}`\n"
-            f"│\n"
-            f"│  🔑  *Password*\n"
-            f"│  `{password}`\n"
-            f"│\n"
-            f"└─  *Inbox terakhir diperbarui...* ─┘"
-            f"{inbox_text}"
+            f"┌─ *ISI PESAN* ─┐\n"
+            f"│ *Dari:* `{sender}`\n"
+            f"│ *Subjek:* _{subject}_\n"
+            f"└─" + "─"*25 + "─┘\n\n"
+            f"{body[:1500]}" # Batasi panjang pesan agar tidak terlalu panjang
         )
-        
-        keyboard = [[InlineKeyboardButton(f"📬 Cek Ulang Inbox ({len(messages)})", callback_data="check_inbox")]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-
-        # Menggunakan try-except untuk mencegah error jika pesan tidak berubah
-        try:
-            await query.edit_message_text(text=response_text, parse_mode='Markdown', reply_markup=reply_markup)
-        except Exception as e:
-            if 'message is not modified' in str(e).lower():
-                # Jika pesan sama (tidak ada email baru), cukup abaikan error
-                pass
-            else:
-                logger.error(f"Gagal mengedit pesan: {e}")
-
+        keyboard = [[InlineKeyboardButton("↩️ Kembali ke Inbox", callback_data="check_inbox_0")]]
+        await query.edit_message_text(text=response_text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
 
 # --- FUNGSI UTAMA UNTUK MENJALANKAN BOT ---
 def main():
-    print("\n" + "="*50)
-    print("      BOT PEMBUAT EMAIL TELEGRAM OLEH NEZA")
-    print("="*50)
+    print("\n" + "="*50 + "\n      BOT PEMBUAT EMAIL TELEGRAM OLEH NEZA\n" + "="*50)
     token = input("Masukkan Token Bot Telegram Anda di sini: ").strip()
     if not token:
         print("\n[!] KESALAHAN: Token tidak boleh kosong. Skrip berhenti.")
         return
-    print("\n[✓] Token diterima. Menjalankan bot...")
-    print("="*50)
+    print("\n[✓] Token diterima. Menjalankan bot...\n" + "="*50)
 
     application = Application.builder().token(token).build()
     
