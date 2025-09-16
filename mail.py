@@ -14,8 +14,7 @@ logger = logging.getLogger(__name__)
 # Inisialisasi Faker
 fake = Faker('id_ID')
 
-# Dictionary untuk menyimpan sesi email & password per pengguna (berbasis chat_id)
-# NOTE: Data ini akan hilang jika skrip di-restart. Untuk produksi, gunakan database.
+# Dictionary untuk menyimpan sesi email & password per pengguna
 user_sessions = {}
 
 # --- FUNGSI API MAIL.TM ---
@@ -63,17 +62,15 @@ async def create_temp_email():
 async def fetch_messages(email, password):
     """Mengambil pesan dari inbox sebuah akun email."""
     try:
-        # 1. Dapatkan token otorisasi
         async with httpx.AsyncClient() as client:
-            auth_response = await client.post("https://api.mail.tm/token", json={"address": email, "password": password})
+            auth_response = await client.post("https://api.mail.tm/token", json={"address": email, "password": password}, timeout=10)
             if auth_response.status_code != 200:
                 return None, "Gagal login ke mail.tm (username/password salah)."
             
             token = auth_response.json()['token']
             headers = {'Authorization': f'Bearer {token}'}
             
-            # 2. Ambil daftar pesan
-            messages_response = await client.get("https://api.mail.tm/messages", headers=headers)
+            messages_response = await client.get("https://api.mail.tm/messages", headers=headers, timeout=10)
             if messages_response.status_code == 200:
                 return messages_response.json()['hydra:member'], None
             else:
@@ -82,11 +79,9 @@ async def fetch_messages(email, password):
         logger.error(f"Error saat mengambil pesan: {e}")
         return None, "Koneksi error saat mengambil pesan."
 
-
 # --- HANDLER PERINTAH TELEGRAM ---
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handler untuk perintah /start."""
     user_name = update.message.from_user.first_name
     await update.message.reply_text(
         f"👋 Halo, *{user_name}*!\n\n"
@@ -96,8 +91,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def buat_email_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Membuat email baru dan menampilkan tombol Cek Inbox."""
-    chat_id = update.effective_chat.id
+    chat_id = update.message.chat_id
     processing_message = await update.message.reply_text("⏳ Sedang membuat akun email Anda...")
     
     result, error_message = await create_temp_email()
@@ -107,7 +101,6 @@ async def buat_email_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if result:
         email = result['email']
         password = result['password']
-        # Simpan sesi pengguna
         user_sessions[chat_id] = {'email': email, 'password': password}
         
         keyboard = [[InlineKeyboardButton("📬 Cek Inbox (0)", callback_data="check_inbox")]]
@@ -129,11 +122,12 @@ async def buat_email_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text(f"❌ *Gagal Membuat Email*\n\n*Alasan:* {error_message}", parse_mode='Markdown')
 
 async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Menangani semua klik tombol inline."""
     query = update.callback_query
-    await query.answer("Sedang memeriksa inbox...") # Tampilkan notifikasi loading singkat
+    await query.answer("Sedang memeriksa inbox...")
     
-    chat_id = query.effective_chat.id
+    # --- INI ADALAH BARIS YANG DIPERBAIKI ---
+    chat_id = query.message.chat_id
+    # ----------------------------------------
     
     if query.data == "check_inbox":
         session = user_sessions.get(chat_id)
@@ -147,10 +141,10 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         messages, error = await fetch_messages(email, password)
         
         if error:
-            await query.edit_message_text(f"Terjadi kesalahan: {error}", reply_markup=query.message.reply_markup)
+            # Menggunakan query.message.text agar teks lama tidak hilang saat error
+            await query.edit_message_text(f"{query.message.text}\n\n*Error:* {error}", parse_mode='Markdown', reply_markup=query.message.reply_markup)
             return
 
-        # Format pesan untuk ditampilkan di Telegram
         if not messages:
             inbox_text = "\n*Inbox Anda saat ini kosong.*"
         else:
@@ -160,7 +154,6 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
                 subject = msg.get('subject', '(Tanpa subjek)')
                 inbox_text += f"• Dari: `{sender}`\n  Subjek: _{subject}_\n"
         
-        # Susun ulang pesan asli dengan info inbox
         response_text = (
             f"┌─  *AKUN EMAIL ANDA* ─┐\n"
             f"│\n"
@@ -174,16 +167,22 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             f"{inbox_text}"
         )
         
-        # Perbarui tombol dengan jumlah pesan baru
         keyboard = [[InlineKeyboardButton(f"📬 Cek Ulang Inbox ({len(messages)})", callback_data="check_inbox")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
-        await query.edit_message_text(text=response_text, parse_mode='Markdown', reply_markup=reply_markup)
+        # Menggunakan try-except untuk mencegah error jika pesan tidak berubah
+        try:
+            await query.edit_message_text(text=response_text, parse_mode='Markdown', reply_markup=reply_markup)
+        except Exception as e:
+            if 'message is not modified' in str(e).lower():
+                # Jika pesan sama (tidak ada email baru), cukup abaikan error
+                pass
+            else:
+                logger.error(f"Gagal mengedit pesan: {e}")
 
 
 # --- FUNGSI UTAMA UNTUK MENJALANKAN BOT ---
 def main():
-    """Fungsi utama untuk menjalankan bot."""
     print("\n" + "="*50)
     print("      BOT PEMBUAT EMAIL TELEGRAM OLEH NEZA")
     print("="*50)
@@ -198,7 +197,7 @@ def main():
     
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("buatemail", buat_email_command))
-    application.add_handler(CallbackQueryHandler(button_callback_handler)) # Handler untuk tombol
+    application.add_handler(CallbackQueryHandler(button_callback_handler))
     
     print("\nBot sekarang online! Tekan CTRL+C untuk berhenti.")
     application.run_polling()
