@@ -4,6 +4,7 @@ import random
 from faker import Faker
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
+from telegram.error import BadRequest
 
 # Konfigurasi logging
 logging.basicConfig(
@@ -134,6 +135,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     action_parts = query.data.split('_')
     action = action_parts[0]
     email, password = session['email'], session['password']
+    response_text, reply_markup = None, None
 
     # === AKSI: Cek Inbox ===
     if action == "check" and "inbox" in action_parts:
@@ -147,20 +149,20 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         
         base_text = get_base_info_text(email, password, "Inbox terakhir diperbarui...")
         inbox_text = "\n\n*Inbox Anda saat ini kosong.*"
-        keyboard = [[InlineKeyboardButton(f"🔄 Refresh Inbox (0)", callback_data="check_inbox_0")]]
+        keyboard_list = [[InlineKeyboardButton(f"🔄 Refresh Inbox (0)", callback_data="check_inbox_0")]]
         
         if messages:
             inbox_text = "\n\n*Pesan yang diterima:*\n"
-            keyboard = []
+            keyboard_list = []
             for i, msg in enumerate(messages):
                 sender = msg['from']['address']
                 subject = msg.get('subject', '(Tanpa subjek)')
                 inbox_text += f"*{i+1}.* Dari: `{sender}`\n    Subjek: _{subject}_\n"
-                keyboard.append([InlineKeyboardButton(f"✉️ Buka Pesan #{i+1}", callback_data=f"open_message_{i}")])
-            keyboard.append([InlineKeyboardButton(f"🔄 Refresh Inbox ({len(messages)})", callback_data="check_inbox_0")])
+                keyboard_list.append([InlineKeyboardButton(f"✉️ Buka Pesan #{i+1}", callback_data=f"open_message_{i}")])
+            keyboard_list.append([InlineKeyboardButton(f"🔄 Refresh Inbox ({len(messages)})", callback_data="check_inbox_0")])
         
         response_text = base_text + inbox_text
-        await query.edit_message_text(text=response_text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
+        reply_markup = InlineKeyboardMarkup(keyboard_list)
 
     # === AKSI: Buka Pesan ===
     elif action == "open" and "message" in action_parts:
@@ -187,8 +189,23 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             f"`{body[:1500]}`"
         )
         response_text = base_text + content_text
-        keyboard = [[InlineKeyboardButton("↩️ Kembali ke Inbox", callback_data="check_inbox_0")]]
-        await query.edit_message_text(text=response_text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
+        keyboard_list = [[InlineKeyboardButton("↩️ Kembali ke Inbox", callback_data="check_inbox_0")]]
+        reply_markup = InlineKeyboardMarkup(keyboard_list)
+
+    # --- PERBAIKAN ERROR: Coba edit pesan, jika tidak ada perubahan, abaikan ---
+    if response_text and reply_markup:
+        try:
+            await query.edit_message_text(text=response_text, parse_mode='Markdown', reply_markup=reply_markup)
+        except BadRequest as e:
+            if "Message is not modified" in str(e):
+                # Ini adalah error yang kita harapkan, abaikan saja
+                pass
+            else:
+                # Jika ada error BadRequest lain, tampilkan di log
+                logger.error(f"Error BadRequest saat mengedit pesan: {e}")
+        except Exception as e:
+            logger.error(f"Error tak terduga saat mengedit pesan: {e}")
+
 
 # --- FUNGSI UTAMA UNTUK MENJALANKAN BOT ---
 def main():
