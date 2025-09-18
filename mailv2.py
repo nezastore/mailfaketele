@@ -1,6 +1,7 @@
 import logging
 import httpx
 import random
+import string
 from faker import Faker
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
@@ -15,50 +16,89 @@ logger = logging.getLogger(__name__)
 # Inisialisasi Faker
 fake = Faker('id_ID')
 
-# Dictionary untuk menyimpan sesi email, password (dummy), dan pesan per pengguna
+# Dictionary untuk menyimpan sesi email, password, mirror base, dan pesan per pengguna
 user_sessions = {}
 
 # =========================
-# BACKEND: 1SECMAIL API
+# BACKEND: 1SECMAIL API (Mirror + Fallback 403)
 # =========================
-BASE_URL = "https://www.1secmail.com/api/v1/"
 
-async def _api_get(params: dict):
-    """Helper untuk GET ke 1secmail dengan timeout & error handling seragam."""
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            r = await client.get(BASE_URL, params=params)
-        if r.status_code == 200:
-            return r.json(), None
-        return None, f"HTTP {r.status_code} dari 1secmail."
-    except Exception as e:
-        logger.error(f"HTTP error 1secmail: {e}")
-        return None, "Koneksi error ke 1secmail."
+MIRRORS = [
+    "https://www.1secmail.com/api/v1/",
+    "https://www.1secmail.net/api/v1/",
+    "https://www.1secmail.org/api/v1/",
+]
+
+UA_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/123.0.0.0 Safari/537.36"
+    )
+}
+
+# Domain publik 1secmail (bisa dipakai tanpa API create)
+PUBLIC_DOMAINS = [
+    "1secmail.com", "1secmail.net", "1secmail.org",
+    "esiix.com", "wwjmp.com", "oosln.com", "vddaz.com",
+    "xojxe.com", "yoggm.com", "zsero.com", "txcct.com"
+]
+
+async def _api_get(params: dict, base_url_hint: str | None = None):
+    """
+    GET ke 1secmail dengan mirror fallback & UA header.
+    Return: (json, used_base_url, err_str)
+    """
+    mirrors = [base_url_hint] + MIRRORS if base_url_hint else MIRRORS
+    last_err = "Tidak bisa menghubungi 1secmail (semua mirror)."
+    for base in mirrors:
+        try:
+            async with httpx.AsyncClient(timeout=10, headers=UA_HEADERS, http2=True) as client:
+                r = await client.get(base, params=params)
+            if r.status_code == 200:
+                return r.json(), base, None
+            elif r.status_code in (401, 403):
+                # Coba mirror lain
+                last_err = f"HTTP {r.status_code} dari {base}"
+                continue
+            else:
+                last_err = f"HTTP {r.status_code} dari {base}"
+        except Exception as e:
+            last_err = f"Koneksi error ke {base}: {e}"
+    return None, None, last_err
+
+def _make_local_login():
+    """Buat login lokal ramah (lowercase + angka) sebagai fallback create."""
+    return (
+        f"{fake.first_name().lower()}{fake.last_name().lower()}{random.randint(10,99)}"
+    ).replace(" ", "")
 
 async def create_temp_email():
     """
-    Ganti pembuatan akun dari mail.tm -> 1secmail.
-    1secmail tidak butuh password, tapi kita tetap membuat password dummy
-    agar TAMPILAN tetap sama seperti sebelumnya.
+    Buat email.
+      1) Coba genRandomMailbox di semua mirror.
+      2) Jika tetap 403/blok, buat alamat lokal (login@domainPublik) TANPA API.
+    Password yang ditampilkan hanyalah dummy agar tampilan tetap sama.
     """
-    # Buat 1 alamat random
-    data, err = await _api_get({"action": "genRandomMailbox", "count": 1})
-    if err or not data:
-        return None, (err or "Gagal membuat email dari 1secmail.")
-    try:
+    # 1) coba genRandomMailbox
+    data, used_base, err = await _api_get({"action": "genRandomMailbox", "count": 1})
+    if not err and data:
         email_address = data[0]
-    except Exception:
-        return None, "Response 1secmail tidak sesuai."
+        password = fake.password(length=12)  # dummy demi tampilan
+        return {"email": email_address, "password": password, "base": used_base}, None
 
-    # Password dummy hanya untuk ditampilkan (tidak dipakai otentikasi)
-    password = fake.password(length=12)
-
-    return {"email": email_address, "password": password}, None
+    # 2) fallback lokal
+    login = _make_local_login()
+    domain = random.choice(PUBLIC_DOMAINS)
+    email_address = f"{login}@{domain}"
+    password = fake.password(length=12)  # dummy
+    # base None: nanti fetch_* akan coba semua mirror
+    return {"email": email_address, "password": password, "base": None}, None
 
 async def get_auth_token(email, password):
     """
-    DISET tetap ada agar handler lama tidak berubah.
-    1secmail tidak pakai token; kita kembalikan dict 'kredensial' berisi login & domain.
+    Tetap disediakan agar kompatibel dengan handler lama.
+    1secmail tidak pakai token; kita kembalikan login & domain.
     """
     try:
         login, domain = email.split("@", 1)
@@ -66,71 +106,59 @@ async def get_auth_token(email, password):
     except ValueError:
         return None, "Format email tidak valid."
 
-async def fetch_messages(token_like):
+async def fetch_messages(token_like, base_url_hint: str | None = None):
     """
-    Ambil daftar pesan dari 1secmail dan NORMALISASI struktur agar sama
-    dengan yang dipakai UI lama:
-      - 'from' -> {'address': "..."}
-      - subject tetap
-      - id tetap
+    Ambil daftar pesan; normalisasi struktur agar cocok dengan UI lama.
+    Return: ({"items": [...], "base": used_base}, None) atau (None, err)
     """
     login = token_like["login"]
     domain = token_like["domain"]
 
-    data, err = await _api_get({
-        "action": "getMessages",
-        "login": login,
-        "domain": domain
-    })
-    if err is not None:
+    data, used_base, err = await _api_get(
+        {"action": "getMessages", "login": login, "domain": domain},
+        base_url_hint=base_url_hint
+    )
+    if err is not None and data is None:
         return None, "Gagal mengambil daftar pesan."
 
     messages = data or []
-    # Normalisasi struktur agar kompatibel dengan UI lama
     normalized = []
     for m in messages:
-        # 1secmail memulangkan: id, from, subject, date, attachments
         sender = m.get("from", "")
         normalized.append({
             "id": m.get("id"),
             "from": {"address": sender},
             "subject": m.get("subject", "(Tanpa subjek)"),
         })
-    return normalized, None
+    return {"items": normalized, "base": used_base}, None
 
-async def fetch_message_content(token_like, message_id):
+async def fetch_message_content(token_like, message_id, base_url_hint: str | None = None):
     """
-    Ambil isi pesan. 1secmail punya 'textBody' & 'htmlBody'.
-    UI lama membaca key 'text', jadi kita mapping ke 'text'.
+    Ambil isi pesan; mapping htmlBody/textBody ke 'text' agar UI lama tetap jalan.
+    Return: ({"item": {...}, "base": used_base}, None) atau (None, err)
     """
     login = token_like["login"]
     domain = token_like["domain"]
 
-    data, err = await _api_get({
-        "action": "readMessage",
-        "login": login,
-        "domain": domain,
-        "id": message_id
-    })
+    data, used_base, err = await _api_get(
+        {"action": "readMessage", "login": login, "domain": domain, "id": message_id},
+        base_url_hint=base_url_hint
+    )
     if err or not data:
         return None, "Gagal mengambil isi pesan."
 
-    # Normalisasi agar handler lama tidak berubah
     subject = data.get("subject", "(Tanpa subjek)")
     text = (data.get("textBody") or data.get("body") or data.get("htmlBody") or "").strip()
-    # Jika htmlBody ada tapi textBody kosong, kita ambil sebagian html sebagai fallback
     if not text and data.get("htmlBody"):
         text = data["htmlBody"]
 
-    normalized = {
-        "subject": subject,
-        "text": text if text else "(Tidak ada isi pesan teks)"
-    }
-    return normalized, None
+    normalized = {"subject": subject, "text": text if text else "(Tidak ada isi pesan teks)"}
+    return {"item": normalized, "base": used_base}, None
 
 # =========================
-# HANDLER TELEGRAM (TIDAK DIUBAH)
+# HANDLER TELEGRAM (TIDAK DIUBAH TAMPILAN)
 # =========================
+
 def get_base_info_text(email, password, footer_text):
     """Fungsi bantuan untuk membuat blok informasi akun dasar."""
     return (
@@ -158,7 +186,11 @@ async def buat_email_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await context.bot.delete_message(chat_id=chat_id, message_id=processing_message.message_id)
     if result:
         email, password = result['email'], result['password']
-        user_sessions[chat_id] = {'email': email, 'password': password}
+        user_sessions[chat_id] = {
+            'email': email,
+            'password': password,
+            'base': result.get('base')  # simpan mirror yang berhasil kalau ada
+        }
 
         keyboard = [[InlineKeyboardButton("📬 Cek Inbox", callback_data="check_inbox_0")]]
         response_text = get_base_info_text(email, password, "Gunakan tombol di bawah untuk memeriksa inbox.")
@@ -189,10 +221,15 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             await query.edit_message_text(f"Error: {error}")
             return
 
-        messages, error = await fetch_messages(token)
+        messages_pack, error = await fetch_messages(token, base_url_hint=user_sessions[chat_id].get('base'))
         if error:
             await query.edit_message_text(f"Error: {error}")
             return
+
+        messages = messages_pack["items"]
+        # simpan base yang sukses dipakai supaya konsisten
+        if messages_pack.get("base"):
+            user_sessions[chat_id]['base'] = messages_pack["base"]
 
         user_sessions[chat_id]['messages'] = messages
 
@@ -227,11 +264,20 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             await query.edit_message_text(f"Error: {error}")
             return
 
-        content, error = await fetch_message_content(token, message_to_open['id'])
+        content_pack, error = await fetch_message_content(
+            token,
+            message_to_open['id'],
+            base_url_hint=user_sessions[chat_id].get('base')
+        )
         if error:
             await query.edit_message_text(f"Error: {error}")
             return
 
+        # simpan base yang sukses
+        if content_pack.get("base"):
+            user_sessions[chat_id]['base'] = content_pack["base"]
+
+        content = content_pack["item"]
         base_text = get_base_info_text(email, password, "Menampilkan isi pesan...")
         subject = content.get('subject', '(Tanpa subjek)')
         body = content.get('text', '(Tidak ada isi pesan teks)').strip()
@@ -252,6 +298,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             await query.edit_message_text(text=response_text, parse_mode='Markdown', reply_markup=reply_markup)
         except BadRequest as e:
             if "Message is not modified" in str(e):
+                # abaikan
                 pass
             else:
                 logger.error(f"Error BadRequest saat mengedit pesan: {e}")
